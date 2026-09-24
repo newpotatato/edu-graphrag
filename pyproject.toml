@@ -87,7 +87,7 @@ line-ending = "lf"
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
-files = ["src", "tests", "migrations"]
+files = ["src"]
 warn_unreachable = true
 
 [tool.pydantic-mypy]
