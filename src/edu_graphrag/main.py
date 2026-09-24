@@ -7,7 +7,7 @@ import structlog
 from fastapi import FastAPI
 
 from edu_graphrag import __version__
-from edu_graphrag.api import system
+from edu_graphrag.api import system, v1
 from edu_graphrag.config import Settings, get_settings
 from edu_graphrag.logging_config import configure_logging
 from edu_graphrag.middleware import RequestContextMiddleware
@@ -29,4 +29,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.add_middleware(RequestContextMiddleware)
     app.include_router(system.router)
+    app.include_router(v1.router)
     return app
