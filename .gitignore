@@ -16,6 +16,7 @@ wheels/
 .coverage
 .coverage.*
 coverage.xml
+junit.xml
 htmlcov/
 
 # Local configuration and secrets
