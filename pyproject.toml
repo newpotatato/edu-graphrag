@@ -7,7 +7,36 @@ authors = [
     { name = "Kirill", email = "kirill242006@yandex.ru" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "structlog>=26.1.0",
+]
+
+# Runtime core lives in [project.dependencies]; everything else is split into
+# groups so that each image installs only what it needs (API image: core + web).
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "mypy>=2.3.1",
+    "pre-commit>=4.6.2",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.8",
+]
+web = [
+    "alembic>=1.20.0",
+    "asyncpg>=0.31.0",
+    "fastapi>=0.141.1",
+    "neo4j>=6.3.1",
+    "sqlalchemy[asyncio]>=2.0.54",
+    "uvicorn[standard]>=0.53.0",
+]
+
+[tool.uv]
+# Local `uv sync` installs everything; Docker uses `uv sync --no-dev`.
+default-groups = ["web", "dev"]
 
 [build-system]
 requires = ["uv_build>=0.12.18,<0.13.0"]
