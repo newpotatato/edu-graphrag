@@ -1,0 +1,105 @@
+# Local stack: app + PostgreSQL + Neo4j.
+# Usage: `cp .env.example .env`, then `just up` (or `docker compose up --build -d`).
+
+name: edu-graphrag
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  app:
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-local}
+    image: ${APP_IMAGE:-edu-graphrag:local}
+    env_file: .env
+    environment:
+      # Inside the compose network services are reached by name, not localhost.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      NEO4J_URI: bolt://neo4j:7687
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    restart: unless-stopped
+    networks: [backend]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    logging: *default-logging
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      # Published on localhost only: for local tools and integration tests.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    logging: *default-logging
+
+  neo4j:
+    image: neo4j:5.26-community
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER}/${NEO4J_PASSWORD:?set NEO4J_PASSWORD in .env}
+      # JVM memory must fit into the container limit below.
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 128m
+    volumes:
+      - neo4j-data:/data
+    ports:
+      - "127.0.0.1:7474:7474"  # browser UI
+      - "127.0.0.1:7687:7687"  # bolt
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    logging: *default-logging
+
+volumes:
+  postgres-data:
+  neo4j-data:
+
+networks:
+  backend:
