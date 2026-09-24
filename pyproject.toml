@@ -1,0 +1,14 @@
+[project]
+name = "edu-graphrag"
+version = "0.1.0"
+description = "Multimodal GraphRAG aggregator of study materials with course and personal knowledge graphs"
+readme = "README.md"
+authors = [
+    { name = "Kirill", email = "kirill242006@yandex.ru" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.12.18,<0.13.0"]
+build-backend = "uv_build"
