@@ -1,0 +1,11 @@
+# Allowlist: send to the build context only what the image needs.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!src/
+!alembic.ini
+!migrations/
+
+**/__pycache__
+**/*.py[oc]
