@@ -1,6 +1,6 @@
 [project]
 name = "edu-graphrag"
-version = "0.1.0"
+version = "0.1.1"
 description = "Multimodal GraphRAG aggregator of study materials with course and personal knowledge graphs"
 readme = "README.md"
 authors = [
