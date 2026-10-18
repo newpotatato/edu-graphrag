@@ -7,10 +7,13 @@
 с общим графом курса (EduKG) и персональным графом знаний студента (PKG).
 
 Сейчас в репозитории — каркас сервиса: асинхронное API, подключение к PostgreSQL и Neo4j,
-тесты, Docker-образ и CI/CD, публикующий версионированный образ в GitHub Container Registry.
+тесты, Docker-образ и CI/CD, публикующий версионированный образ в GitHub Container Registry;
+ML-пайплайн на MLflow: датасет → эксперименты → Model Registry → `POST /api/v1/process`
+(подробно — [docs/mlflow.md](docs/mlflow.md)).
 
 **Стек:** Python 3.12 · FastAPI · SQLAlchemy 2 (asyncpg) + Alembic · Neo4j async driver ·
-structlog · uv · ruff · mypy · pytest · Docker · GitHub Actions · GHCR
+structlog · uv · ruff · mypy · pytest · Docker · GitHub Actions · GHCR ·
+MLflow 3 (Postgres + SeaweedFS S3) · scikit-learn · BM25
 
 ---
 
@@ -51,7 +54,9 @@ Swagger UI: <http://localhost:8000/docs>, Neo4j Browser: <http://localhost:7474>
 |---|---|
 | `GET /healthz` | liveness: процесс жив и отвечает. **Не ходит в БД** |
 | `GET /api/v1/version` | версия приложения и коммит, из которого собран образ |
-| `GET /api/v1/health` | end-to-end проверка: версия и время ответа каждого компонента |
+| `GET /api/v1/health` | end-to-end проверка: версия и время ответа каждого компонента (вкл. модель из MLflow) |
+| `POST /api/v1/process` | инференс моделью из MLflow Model Registry, загруженной при старте |
+| `GET /api/v1/model` | какая версия модели обслуживается (name, alias, version, run_id) |
 
 ```jsonc
 // GET /api/v1/health -> 200, или 503 если хоть что-то лежит (тело то же, с причиной)
@@ -268,3 +273,23 @@ docker pull ghcr.io/newpotatato/edu-graphrag:latest
 | `NEO4J_URI` / `NEO4J_USER` | `bolt://localhost:7687` / `neo4j` | |
 | `NEO4J_PASSWORD` | — | обязательно, ≥ 8 символов |
 | `APP_COMMIT_SHA` | `unknown` | выставляется при сборке образа |
+| `MLFLOW_TRACKING_URI` | `http://localhost:5000` | в compose приложению — `http://mlflow:5000` |
+| `MODEL_NAME` / `MODEL_ALIAS` | `subject-classifier` / `champion` | какую модель грузить при старте |
+| `MODEL_ENABLED` | `true` | `false` — приложение без модели |
+| `MLFLOW_DB_*`, `MLFLOW_S3_*` | — | только для сервера MLflow (backend и artifact store) |
+
+---
+
+## MLflow: эксперименты, Model Registry, inference
+
+Подробно — [docs/mlflow.md](docs/mlflow.md): архитектура, датасет и lineage, таблицы
+экспериментов, Registry, сценарий переключения alias и почему «горячее обновление» — плохая идея.
+
+```bash
+just mlflow-up                                   # MLflow UI: http://localhost:5000
+just dataset C:/obsidian_workspace/university    # архив -> data/processed (не в git)
+just eda                                         # EDA + датасет -> MLflow
+just train-classifier                            # runs + регистрация + champion/challenger
+just up && just model                            # приложение грузит subject-classifier@champion
+just champion 1                                  # alias -> v1 и рестарт: приложение берёт v1
+```

@@ -2,6 +2,11 @@
 # Recipes use syntax that works both in sh (Linux/macOS/CI) and PowerShell (Windows).
 
 set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
+# ML recipes read MLFLOW_TRACKING_URI etc. from .env
+set dotenv-load := true
+
+export PYTHONUTF8 := "1"
+export MLFLOW_DISABLE_AGENT_HINT := "1"
 
 # List available recipes
 default:
@@ -77,6 +82,34 @@ migrate:
 # Call all endpoints of the running app
 smoke url="http://localhost:8000":
     uv run python scripts/smoke.py {{ url }}
+
+# ---------- ML pipeline (needs `just mlflow-up`) ----------
+
+# Build documents/chunks parquet from the study archive (incremental by content hash)
+dataset data_root:
+    uv run python -m edu_graphrag.ml.ingest.build_dataset --data-root {{ data_root }} --out data/processed
+
+# EDA plots and tables, logged to MLflow together with the dataset
+eda:
+    uv run python -m edu_graphrag.ml.eda --data data/processed --log-to-mlflow
+
+# Train all subject-classifier variants, register baseline + best, set aliases
+train-classifier:
+    uv run python -m edu_graphrag.ml.classifier.train --all
+    uv run python -m edu_graphrag.ml.classifier.register
+
+# Evaluate retriever variants on the QA set, register baseline + best, set aliases
+train-retriever *variants="bm25 bm25_prefix5":
+    uv run python -m edu_graphrag.ml.rag.experiment --data data/processed --qa data/qa/qa.jsonl --variants {{ variants }}
+
+# Point the champion alias to a version, then restart the app to serve it
+champion version model="subject-classifier":
+    uv run python -c "import mlflow; mlflow.MlflowClient().set_registered_model_alias('{{ model }}', 'champion', '{{ version }}'); print('{{ model }}@champion -> v{{ version }}')"
+    docker compose restart app
+
+# Show which model version the running app serves
+model url="http://localhost:8000":
+    uv run python -c "import json, urllib.request; print(json.dumps(json.load(urllib.request.urlopen('{{ url }}/api/v1/model')), indent=2))"
 
 # Bump version (patch|minor|major), commit, tag and push: CD publishes the image
 release bump="patch":
