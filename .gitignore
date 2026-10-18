@@ -29,3 +29,8 @@ htmlcov/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Study materials and derived datasets never go to the public repo
+data/
+mlruns/
+mlartifacts/

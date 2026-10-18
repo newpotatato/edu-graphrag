@@ -19,14 +19,14 @@ WORKDIR /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --locked --no-dev --no-install-project
+    uv sync --locked --no-default-groups --group web --no-install-project
 
 # 2) The project itself, installed as a regular (non-editable) package:
 #    the runtime image needs only the venv, and package metadata carries the version.
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-editable
+    uv sync --locked --no-default-groups --group web --no-editable
 
 # ---------- runtime: slim image without uv, build tools and sources ----------
 FROM ${PYTHON_IMAGE} AS runtime

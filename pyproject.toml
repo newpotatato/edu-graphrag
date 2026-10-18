@@ -13,8 +13,9 @@ dependencies = [
     "structlog>=26.1.0",
 ]
 
-# Runtime core lives in [project.dependencies]; everything else is split into
-# groups so that each image installs only what it needs (API image: core + web).
+# Runtime core lives in [project.dependencies]; everything else is split into groups:
+# web = API service incl. model inference, ml = data pipeline + training, dev = tooling.
+# Each image installs only what it needs (API image: core + web).
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
@@ -25,18 +26,33 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.16.8",
 ]
+ml = [
+    "matplotlib>=3.11.2",
+    "mlflow>=3.17",
+    "nbformat>=5.11.1",
+    "pyarrow>=25.0.1",
+    "pymupdf4llm>=1.28.2",
+    "python-docx>=1.2.0",
+    "python-pptx>=1.0.2",
+]
 web = [
     "alembic>=1.20.0",
     "asyncpg>=0.31.0",
     "fastapi>=0.141.1",
+    "fastembed>=0.9.0",
+    "mlflow-skinny>=3.17",
     "neo4j>=6.3.1",
+    "numpy>=2.5.4",
+    "pandas>=3.0",
+    "rank-bm25>=0.2.2",
+    "scikit-learn>=1.9",
     "sqlalchemy[asyncio]>=2.0.54",
     "uvicorn[standard]>=0.53.0",
 ]
 
 [tool.uv]
-# Local `uv sync` installs everything; Docker uses `uv sync --no-dev`.
-default-groups = ["web", "dev"]
+# Local `uv sync` installs everything; the API image installs only core + web.
+default-groups = ["web", "ml", "dev"]
 
 [tool.ruff]
 target-version = "py312"
@@ -89,6 +105,11 @@ strict = true
 plugins = ["pydantic.mypy"]
 files = ["src", "tests", "migrations", "scripts"]
 warn_unreachable = true
+
+# Libraries without type information.
+[[tool.mypy.overrides]]
+module = ["rank_bm25.*", "pymupdf4llm.*", "fitz.*", "pymupdf.*", "docx.*", "pptx.*", "nbformat.*", "fastembed.*", "sklearn.*", "joblib.*"]
+ignore_missing_imports = true
 
 [tool.pydantic-mypy]
 init_forbid_extra = true
