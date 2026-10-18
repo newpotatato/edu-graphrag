@@ -13,7 +13,11 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture
 def real_settings() -> Settings:
-    return Settings()  # POSTGRES_* / NEO4J_* from the environment or .env
+    settings = Settings()  # POSTGRES_* / NEO4J_* from the environment or .env
+    # These tests cover the databases; the MLflow model component has its own tests on a
+    # temporary sqlite store, so CI does not need a tracking server.
+    settings.mlflow.model_enabled = False
+    return settings
 
 
 async def test_postgres_returns_server_version(real_settings: Settings) -> None:
