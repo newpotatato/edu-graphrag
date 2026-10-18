@@ -62,6 +62,14 @@ logs service="app":
 ps:
     docker compose ps
 
+# Start only MLflow and its stores (backend DB, SeaweedFS, bucket init)
+mlflow-up:
+    docker compose up --build -d --wait mlflow
+
+# Print the MLflow UI address
+mlflow-ui port="5000":
+    @echo "MLflow UI: http://localhost:{{ port }}"
+
 # Apply database migrations inside the running app container
 migrate:
     docker compose exec app alembic upgrade head

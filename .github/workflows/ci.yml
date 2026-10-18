@@ -77,7 +77,7 @@ jobs:
     # Disposable credentials for throwaway service containers that live only inside this job.
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:17-alpine3.22
         env:
           POSTGRES_USER: edu
           POSTGRES_PASSWORD: ci-only-password

@@ -1,4 +1,4 @@
-# Local stack: app + PostgreSQL + Neo4j.
+# Local stack: app + PostgreSQL + Neo4j + MLflow (PostgreSQL backend store, SeaweedFS artifact store).
 # Usage: `cp .env.example .env`, then `just up` (or `docker compose up --build -d`).
 
 name: edu-graphrag
@@ -22,12 +22,18 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       NEO4J_URI: bolt://neo4j:7687
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      # Keep artifact transfers proxied through the server (see the mlflow service).
+      MLFLOW_ENABLE_PROXY_MULTIPART_UPLOAD: "false"
+      MLFLOW_ENABLE_PROXY_MULTIPART_DOWNLOAD: "false"
     ports:
       - "${APP_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
       neo4j:
+        condition: service_healthy
+      mlflow:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
@@ -45,7 +51,7 @@ services:
     logging: *default-logging
 
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17-alpine3.22
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
@@ -97,9 +103,157 @@ services:
           memory: 1G
     logging: *default-logging
 
+  # ---------- MLflow tracking server ----------
+  # Clients (training scripts, the app) need only MLFLOW_TRACKING_URI: artifacts are
+  # uploaded/downloaded through the server (--serve-artifacts), so S3 keys stay here.
+  # MLflow 3 advertises presigned direct-to-S3 transfers for S3 stores; clients turn
+  # them off with MLFLOW_ENABLE_PROXY_MULTIPART_{UPLOAD,DOWNLOAD}=false, because
+  # seaweedfs:8333 is not reachable (and not meant to be) from outside the network.
+  mlflow:
+    build:
+      context: docker/mlflow
+    image: edu-graphrag-mlflow:local
+    command:
+      - mlflow
+      - server
+      - --backend-store-uri=postgresql+psycopg2://${MLFLOW_DB_USER}:${MLFLOW_DB_PASSWORD}@mlflow-db:5432/${MLFLOW_DB_NAME}
+      - --artifacts-destination=s3://mlflow
+      - --serve-artifacts
+      - --host=0.0.0.0
+      - --port=5000
+      - --workers=2
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://seaweedfs:8333
+      AWS_ACCESS_KEY_ID: ${MLFLOW_S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${MLFLOW_S3_SECRET_KEY:?set MLFLOW_S3_SECRET_KEY in .env}
+      AWS_DEFAULT_REGION: us-east-1
+      # Host header allowlist (DNS rebinding protection): the compose service name
+      # and localhost. /health is exempt, API calls are not.
+      MLFLOW_SERVER_ALLOWED_HOSTS: mlflow,mlflow:5000,localhost,localhost:*,127.0.0.1,127.0.0.1:*
+      # Background job workers (GenAI evaluation/optimization from the UI) take ~900 MB
+      # and are not needed for experiment tracking and the model registry.
+      MLFLOW_SERVER_ENABLE_JOB_EXECUTION: "false"
+    ports:
+      - "${MLFLOW_PORT:-5000}:5000"  # UI + REST API
+    depends_on:
+      mlflow-db:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+      seaweedfs-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      start_period: 30s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    logging: *default-logging
+
+  # Backend store: experiments, runs, params, metrics, model registry.
+  # A separate instance keeps ML metadata isolated from the product database.
+  mlflow-db:
+    image: postgres:17-alpine3.22
+    environment:
+      POSTGRES_USER: ${MLFLOW_DB_USER}
+      POSTGRES_PASSWORD: ${MLFLOW_DB_PASSWORD:?set MLFLOW_DB_PASSWORD in .env}
+      POSTGRES_DB: ${MLFLOW_DB_NAME}
+    volumes:
+      - mlflow-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging: *default-logging
+
+  # Artifact store: SeaweedFS with an S3-compatible API (MinIO is no longer an option:
+  # its repository is archived and no images are published).
+  # `server -s3` runs master, volume, filer and S3 gateway in one container.
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.48
+    command: ["server", "-s3", "-s3.config=/etc/seaweedfs/s3.json", "-ip=seaweedfs", "-ip.bind=0.0.0.0"]
+    configs:
+      - source: seaweedfs-s3
+        target: /etc/seaweedfs/s3.json
+    volumes:
+      - seaweedfs-data:/data
+    ports:
+      # Localhost only, for debugging: clients go through the MLflow server.
+      - "127.0.0.1:8333:8333"  # S3 API
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8333/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    logging: *default-logging
+
+  # One-shot job: create the `mlflow` bucket (idempotent), then exit.
+  seaweedfs-init:
+    image: chrislusf/seaweedfs:4.48
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if echo 's3.bucket.list' | weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888 | grep -qw mlflow; then
+          echo 'bucket mlflow already exists'
+        else
+          echo 's3.bucket.create -name mlflow' | weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888
+        fi
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    restart: "no"
+    networks: [backend]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+    logging: *default-logging
+
+# S3 identities, rendered from .env (no anonymous access: requests must be signed).
+configs:
+  seaweedfs-s3:
+    content: |
+      {
+        "identities": [
+          {
+            "name": "mlflow",
+            "credentials": [
+              {"accessKey": "${MLFLOW_S3_ACCESS_KEY}", "secretKey": "${MLFLOW_S3_SECRET_KEY}"}
+            ],
+            "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+          }
+        ]
+      }
+
 volumes:
   postgres-data:
   neo4j-data:
+  mlflow-db-data:
+  seaweedfs-data:
 
 networks:
   backend:
