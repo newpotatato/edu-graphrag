@@ -29,6 +29,19 @@ class Neo4jSettings(BaseSettings):
     password: SecretStr
 
 
+class MlflowSettings(BaseSettings):
+    """Model served by /api/v1/process. No prefix: the names match MLflow's own env variables."""
+
+    model_config = SettingsConfigDict(env_file=_ENV_FILE, extra="ignore")
+
+    mlflow_tracking_uri: str = "http://localhost:5000"
+    model_name: str = "subject-classifier"
+    # The app serves whatever version this alias points to at startup.
+    model_alias: str = "champion"
+    # Off for deployments that do not serve a model at all.
+    model_enabled: bool = True
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=_ENV_FILE, extra="ignore")
 
@@ -44,6 +57,7 @@ class Settings(BaseSettings):
 
     postgres: PostgresSettings = Field(default_factory=PostgresSettings)
     neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
+    mlflow: MlflowSettings = Field(default_factory=MlflowSettings)
 
 
 @lru_cache

@@ -6,7 +6,7 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 
 from edu_graphrag.components import Component
-from edu_graphrag.config import Neo4jSettings, PostgresSettings, Settings
+from edu_graphrag.config import MlflowSettings, Neo4jSettings, PostgresSettings, Settings
 from edu_graphrag.main import create_app
 from tests.fakes import FakeComponent
 
@@ -37,6 +37,7 @@ def settings() -> Settings:
         health_check_timeout=0.5,
         postgres=PostgresSettings(password=SecretStr("test")),
         neo4j=Neo4jSettings(password=SecretStr("test")),
+        mlflow=MlflowSettings(mlflow_tracking_uri="http://mlflow.invalid"),
     )
 
 

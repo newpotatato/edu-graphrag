@@ -108,7 +108,7 @@ warn_unreachable = true
 
 # Libraries without type information.
 [[tool.mypy.overrides]]
-module = ["rank_bm25.*", "pymupdf4llm.*", "fitz.*", "pymupdf.*", "docx.*", "pptx.*", "nbformat.*", "fastembed.*", "sklearn.*", "joblib.*"]
+module = ["pandas.*", "pyarrow.*", "rank_bm25.*", "pymupdf4llm.*", "fitz.*", "pymupdf.*", "docx.*", "pptx.*", "nbformat.*", "fastembed.*", "sklearn.*", "joblib.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]

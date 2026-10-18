@@ -32,7 +32,13 @@ async def test_started_components_are_stopped_if_later_startup_fails() -> None:
     assert events == ["start:a", "stop:a"]
 
 
-def test_build_components_registers_postgres_and_neo4j(settings: Settings) -> None:
+def test_build_components_registers_postgres_neo4j_and_model(settings: Settings) -> None:
+    assert [c.name for c in build_components(settings)] == ["postgres", "neo4j", "mlflow_model"]
+
+
+def test_model_component_can_be_disabled(settings: Settings) -> None:
+    settings.mlflow.model_enabled = False
+
     assert [c.name for c in build_components(settings)] == ["postgres", "neo4j"]
 
 

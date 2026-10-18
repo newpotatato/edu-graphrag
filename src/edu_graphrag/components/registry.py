@@ -4,6 +4,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 import structlog
 
 from edu_graphrag.components.base import Component
+from edu_graphrag.components.mlflow_model import MlflowModelComponent
 from edu_graphrag.components.neo4j import Neo4jComponent
 from edu_graphrag.components.postgres import PostgresComponent
 from edu_graphrag.config import Settings
@@ -13,10 +14,13 @@ logger = structlog.get_logger(__name__)
 
 def build_components(settings: Settings) -> list[Component]:
     timeout = settings.health_check_timeout
-    return [
+    components: list[Component] = [
         PostgresComponent(settings.postgres, connect_timeout=timeout),
         Neo4jComponent(settings.neo4j, connect_timeout=timeout),
     ]
+    if settings.mlflow.model_enabled:
+        components.append(MlflowModelComponent(settings.mlflow))
+    return components
 
 
 @asynccontextmanager
