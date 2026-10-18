@@ -27,6 +27,7 @@ dev = [
     "ruff>=0.16.8",
 ]
 ml = [
+    "fastembed>=0.9.0",
     "matplotlib>=3.11.2",
     "mlflow>=3.17",
     "nbformat>=5.11.1",
@@ -39,7 +40,6 @@ web = [
     "alembic>=1.20.0",
     "asyncpg>=0.31.0",
     "fastapi>=0.141.1",
-    "fastembed>=0.9.0",
     "mlflow-skinny>=3.17",
     "neo4j>=6.3.1",
     "numpy>=2.5.4",

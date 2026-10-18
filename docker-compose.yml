@@ -154,7 +154,7 @@ services:
       resources:
         limits:
           cpus: "1.0"
-          memory: 1G
+          memory: 1536M
     logging: *default-logging
 
   # Backend store: experiments, runs, params, metrics, model registry.
@@ -207,7 +207,7 @@ services:
       resources:
         limits:
           cpus: "1.0"
-          memory: 512M
+          memory: 1G
     logging: *default-logging
 
   # One-shot job: create the `mlflow` bucket (idempotent), then exit.

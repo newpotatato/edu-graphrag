@@ -927,6 +927,7 @@ dev = [
     { name = "ruff" },
 ]
 ml = [
+    { name = "fastembed" },
     { name = "matplotlib" },
     { name = "mlflow" },
     { name = "nbformat" },
@@ -939,7 +940,6 @@ web = [
     { name = "alembic" },
     { name = "asyncpg" },
     { name = "fastapi" },
-    { name = "fastembed" },
     { name = "mlflow-skinny" },
     { name = "neo4j" },
     { name = "numpy" },
@@ -968,6 +968,7 @@ dev = [
     { name = "ruff", specifier = ">=0.16.8" },
 ]
 ml = [
+    { name = "fastembed", specifier = ">=0.9.0" },
     { name = "matplotlib", specifier = ">=3.11.2" },
     { name = "mlflow", specifier = ">=3.17" },
     { name = "nbformat", specifier = ">=5.11.1" },
@@ -980,7 +981,6 @@ web = [
     { name = "alembic", specifier = ">=1.20.0" },
     { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "fastapi", specifier = ">=0.141.1" },
-    { name = "fastembed", specifier = ">=0.9.0" },
     { name = "mlflow-skinny", specifier = ">=3.17" },
     { name = "neo4j", specifier = ">=6.3.1" },
     { name = "numpy", specifier = ">=2.5.4" },
