@@ -8,7 +8,7 @@ and to reason about). /api/v1/health shows when the alias already points elsewhe
 
 Degraded start: if MLflow is unreachable or the alias does not exist, the app still starts
 (/healthz and /api/v1/version keep working), the failure is logged as `model_load_failed`,
-/api/v1/process answers 503 and /api/v1/health reports this component as down.
+the worker refuses to consume and its health reports this component as down.
 
 Only mlflow-skinny modules are used here: the API image does not ship the full mlflow.
 """

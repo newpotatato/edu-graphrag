@@ -30,7 +30,7 @@ class Neo4jSettings(BaseSettings):
 
 
 class MlflowSettings(BaseSettings):
-    """Model served by /api/v1/process. No prefix: the names match MLflow's own env variables."""
+    """Model served by the inference workers. No prefix: the names match MLflow's own env variables."""
 
     model_config = SettingsConfigDict(env_file=_ENV_FILE, extra="ignore")
 

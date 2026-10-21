@@ -2,8 +2,12 @@
 
 from datetime import datetime
 from typing import Annotated, Any, Literal
+from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+
+from edu_graphrag.pipeline.messages import MAX_TEXT_CHARS
+from edu_graphrag.pipeline.store import TaskStatus
 
 
 class LivenessResponse(BaseModel):
@@ -29,42 +33,54 @@ class HealthResponse(BaseModel):
     components: list[ComponentHealth]
 
 
-# Limits keep one request bounded in memory and inference time.
-MAX_TEXTS_PER_REQUEST = 64
-MAX_TEXT_LENGTH = 20_000
-
-
 def _not_blank(value: str) -> str:
     if not value.strip():
         raise ValueError("text must not be blank")
     return value
 
 
+# Same limit as the queue message contract: what the API accepts always fits a TaskMessage.
 InputText = Annotated[
-    str, Field(min_length=1, max_length=MAX_TEXT_LENGTH), AfterValidator(_not_blank)
+    str, Field(min_length=1, max_length=MAX_TEXT_CHARS), AfterValidator(_not_blank)
 ]
 
 
-class ModelRef(BaseModel):
-    name: str
-    alias: str
-    version: str = Field(description="Concrete registry version the alias resolved to at startup")
-    run_id: str | None
-
-
-class ModelInfo(ModelRef):
-    model_uri: str = Field(description="Exact URI that was loaded, e.g. models:/name/3")
-    loaded_at: datetime
-
-
-class ProcessRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    texts: list[InputText] = Field(min_length=1, max_length=MAX_TEXTS_PER_REQUEST)
-
-
-class ProcessResponse(BaseModel):
-    model: ModelRef
-    predictions: list[dict[str, Any]] = Field(
-        description="One object per output row: the model's columns, or {'prediction': value}"
+class TaskCreateRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"examples": [{"text": "Решите квадратное уравнение x^2 - 5x + 6 = 0"}]},
     )
+
+    text: InputText = Field(description=f"Text to classify, 1..{MAX_TEXT_CHARS} characters")
+
+
+class TaskAccepted(BaseModel):
+    task_id: UUID
+    status: Literal["pending"] = "pending"
+    status_url: str = Field(description="Poll this URL for the result (also in `Location`)")
+
+
+class TaskStatusResponse(BaseModel):
+    task_id: UUID
+    status: TaskStatus = Field(description="pending -> done | failed")
+    source: str = Field(description="Who submitted the task: api or batch")
+    result: dict[str, Any] | None = Field(None, description="Model output when done")
+    error: str | None = Field(None, description="Why the task failed (dead-lettered)")
+    model_name: str | None = None
+    model_version: str | None = Field(None, description="Registry version that produced it")
+    attempts: int = Field(description="Deliveries it took (redeliveries after worker failures)")
+    submitted_at: datetime
+    finished_at: datetime | None = None
+    processing_ms: float | None = Field(
+        None, description="finished_at - submitted_at: queueing + inference, milliseconds"
+    )
+
+
+class Problem(BaseModel):
+    """RFC 9457 problem details (`application/problem+json`)."""
+
+    type: str = "about:blank"
+    title: str
+    status: int
+    detail: str
+    retry_after: int | None = Field(None, description="Same value as the Retry-After header, s")

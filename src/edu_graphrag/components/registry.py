@@ -4,23 +4,23 @@ from contextlib import AsyncExitStack, asynccontextmanager
 import structlog
 
 from edu_graphrag.components.base import Component
-from edu_graphrag.components.mlflow_model import MlflowModelComponent
 from edu_graphrag.components.neo4j import Neo4jComponent
 from edu_graphrag.components.postgres import PostgresComponent
+from edu_graphrag.components.rabbit import RabbitComponent
 from edu_graphrag.config import Settings
 
 logger = structlog.get_logger(__name__)
 
 
 def build_components(settings: Settings) -> list[Component]:
+    """Dependencies of the API process. The model is not among them any more: inference runs
+    in the workers (`pipeline.worker` reuses `MlflowModelComponent`); the API only publishes."""
     timeout = settings.health_check_timeout
-    components: list[Component] = [
+    return [
         PostgresComponent(settings.postgres, connect_timeout=timeout),
         Neo4jComponent(settings.neo4j, connect_timeout=timeout),
+        RabbitComponent(settings.rabbit, connect_timeout=timeout),
     ]
-    if settings.mlflow.model_enabled:
-        components.append(MlflowModelComponent(settings.mlflow))
-    return components
 
 
 @asynccontextmanager

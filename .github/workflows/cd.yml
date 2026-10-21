@@ -94,7 +94,8 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           docker run -d --name app -p 8000:8000 \
-            -e POSTGRES_PASSWORD=unused -e NEO4J_PASSWORD=unused edu-graphrag:ci
+            -e POSTGRES_PASSWORD=unused -e NEO4J_PASSWORD=unused -e RABBITMQ_PASSWORD=unused \
+            edu-graphrag:ci
           for _ in $(seq 30); do curl -fsS localhost:8000/healthz && break; sleep 1; done
           echo
           reported=$(curl -fsS localhost:8000/api/v1/version | jq -r .version)

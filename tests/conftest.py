@@ -1,10 +1,12 @@
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from typing import Protocol
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 
+from edu_graphrag.api.task_service import TaskService
 from edu_graphrag.components import Component
 from edu_graphrag.config import (
     MlflowSettings,
@@ -16,7 +18,11 @@ from edu_graphrag.config import (
 from edu_graphrag.main import create_app
 from tests.fakes import FakeComponent
 
-ClientFactory = Callable[[Sequence[Component]], AbstractAsyncContextManager[AsyncClient]]
+
+class ClientFactory(Protocol):
+    def __call__(
+        self, components: Sequence[Component], task_service: TaskService | None = None
+    ) -> AbstractAsyncContextManager[AsyncClient]: ...
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -53,8 +59,10 @@ def make_client(settings: Settings) -> ClientFactory:
     """Builds the app with the given components and runs its lifespan."""
 
     @asynccontextmanager
-    async def factory(components: Sequence[Component]) -> AsyncIterator[AsyncClient]:
-        app = create_app(settings, components)
+    async def factory(
+        components: Sequence[Component], task_service: TaskService | None = None
+    ) -> AsyncIterator[AsyncClient]:
+        app = create_app(settings, components, task_service)
         transport = ASGITransport(app=app)
         async with (
             app.router.lifespan_context(app),
