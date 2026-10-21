@@ -111,6 +111,32 @@ champion version model="subject-classifier":
 model url="http://localhost:8000":
     uv run python -c "import json, urllib.request; print(json.dumps(json.load(urllib.request.urlopen('{{ url }}/api/v1/model')), indent=2))"
 
+# ---------- task pipeline (RabbitMQ + inference workers) ----------
+
+# Start RabbitMQ, declare topology + queue policy, migrate the DB, start one worker
+pipeline-up $GIT_SHA=`git rev-parse --short HEAD`:
+    docker compose up --build -d --wait rabbitmq worker
+
+# Scale the inference workers (existing ones keep running)
+workers n="1":
+    docker compose up -d --wait --no-recreate --scale worker={{ n }} worker
+
+# Change the tasks queue capacity at runtime (RabbitMQ policy; 0 = unbounded)
+queue-limit n:
+    uv run python -m edu_graphrag.pipeline.admin apply-policy --max-length {{ n }}
+
+# Queue depths, consumers, rates and broker memory (observation only)
+queue-stats:
+    uv run python -m edu_graphrag.pipeline.admin stats
+
+# Follow the logs of all worker replicas
+worker-logs:
+    docker compose logs -f worker
+
+# Send SIGTERM to the workers: they finish in-flight tasks, then exit (graceful shutdown demo)
+sigterm-worker:
+    docker compose kill -s SIGTERM worker
+
 # Bump version (patch|minor|major), commit, tag and push: CD publishes the image
 release bump="patch":
     uv version --bump {{ bump }}

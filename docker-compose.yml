@@ -1,4 +1,5 @@
-# Local stack: app + PostgreSQL + Neo4j + MLflow (PostgreSQL backend store, SeaweedFS artifact store).
+# Local stack: app + PostgreSQL + Neo4j + MLflow (PostgreSQL backend store, SeaweedFS artifact store)
+# + task pipeline (RabbitMQ, inference workers).
 # Usage: `cp .env.example .env`, then `just up` (or `docker compose up --build -d`).
 
 name: edu-graphrag
@@ -26,6 +27,8 @@ services:
       # Keep artifact transfers proxied through the server (see the mlflow service).
       MLFLOW_ENABLE_PROXY_MULTIPART_UPLOAD: "false"
       MLFLOW_ENABLE_PROXY_MULTIPART_DOWNLOAD: "false"
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
     ports:
       - "${APP_PORT:-8000}:8000"
     depends_on:
@@ -35,6 +38,12 @@ services:
         condition: service_healthy
       mlflow:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      rabbitmq-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
       interval: 15s
@@ -233,6 +242,128 @@ services:
           memory: 128M
     logging: *default-logging
 
+  # ---------- task pipeline ----------
+  # One-shot job: apply database migrations (the `tasks` table) before app and workers start.
+  migrate:
+    image: ${APP_IMAGE:-edu-graphrag:local}
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks: [backend]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging: *default-logging
+
+  # Message broker. Quorum queues work on a single node (a cluster of one).
+  rabbitmq:
+    image: rabbitmq:4.2-management-alpine
+    hostname: rabbitmq  # the node name (and its data directory) depends on the hostname
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
+      # Two scheduler threads: the broker is not the bottleneck here, memory is.
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "+S 2:2"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    ports:
+      - "127.0.0.1:${RABBITMQ_PORT:-5672}:5672"  # AMQP, for host-side publishers and tests
+      - "127.0.0.1:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"  # Management UI + HTTP API
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      start_period: 30s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    logging: *default-logging
+
+  # One-shot job: declare exchanges/queues/bindings and apply the queue policy (idempotent).
+  rabbitmq-init:
+    image: ${APP_IMAGE:-edu-graphrag:local}
+    env_file: .env
+    environment:
+      RABBITMQ_HOST: rabbitmq
+    command: ["sh", "-c", "python -m edu_graphrag.pipeline.admin declare && python -m edu_graphrag.pipeline.admin apply-policy"]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: "no"
+    networks: [backend]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+    logging: *default-logging
+
+  # Inference worker: an independent process connected to publishers only through RabbitMQ.
+  # No container_name and no fixed host port: `docker compose up -d --scale worker=2` works.
+  # Health: `docker compose exec worker python -c ...` or the published range 8101-8104.
+  worker:
+    # Same image as the app; `build` here lets `up --build worker` work without the app.
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-local}
+    image: ${APP_IMAGE:-edu-graphrag:local}
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_ENABLE_PROXY_MULTIPART_UPLOAD: "false"
+      MLFLOW_ENABLE_PROXY_MULTIPART_DOWNLOAD: "false"
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+      INFERENCE_DELAY_MS: ${INFERENCE_DELAY_MS:-200}
+    command: ["uvicorn", "edu_graphrag.pipeline.worker:create_app", "--factory", "--host", "0.0.0.0", "--port", "8001", "--no-access-log"]
+    ports:
+      - "127.0.0.1:8101-8104:8001"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      rabbitmq-init:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      start_period: 30s
+      retries: 3
+    # SIGTERM -> stop consuming -> finish in-flight tasks (up to WORKER_GRACEFUL_TIMEOUT,
+    # 20 s by default) -> exit. Docker sends SIGKILL only after this period: keep it longer.
+    stop_grace_period: 30s
+    restart: unless-stopped
+    networks: [backend]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    logging: *default-logging
+
 # S3 identities, rendered from .env (no anonymous access: requests must be signed).
 configs:
   seaweedfs-s3:
@@ -254,6 +385,7 @@ volumes:
   neo4j-data:
   mlflow-db-data:
   seaweedfs-data:
+  rabbitmq-data:
 
 networks:
   backend:
