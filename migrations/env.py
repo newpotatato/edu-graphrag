@@ -9,14 +9,14 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from edu_graphrag.components.postgres import build_postgres_url
 from edu_graphrag.config import PostgresSettings
+from edu_graphrag.pipeline.store import metadata
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# ORM models do not exist yet; set this to `Base.metadata` once they do,
-# so that `alembic revision --autogenerate` can diff against it.
-target_metadata = None
+# Table metadata of the task store: `alembic revision --autogenerate` diffs against it.
+target_metadata = metadata
 
 
 def run_migrations_offline() -> None:

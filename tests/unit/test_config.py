@@ -8,7 +8,13 @@ from edu_graphrag.config import Settings
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    for name in ("POSTGRES_PASSWORD", "NEO4J_PASSWORD", "HEALTH_CHECK_TIMEOUT", "POSTGRES_HOST"):
+    for name in (
+        "POSTGRES_PASSWORD",
+        "NEO4J_PASSWORD",
+        "RABBITMQ_PASSWORD",
+        "HEALTH_CHECK_TIMEOUT",
+        "POSTGRES_HOST",
+    ):
         monkeypatch.delenv(name, raising=False)
     # `.env` is resolved relative to the working directory: ignore a developer's local one.
     monkeypatch.chdir(tmp_path)
@@ -18,6 +24,7 @@ def test_settings_are_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
     monkeypatch.setenv("POSTGRES_PASSWORD", "pg-secret")
     monkeypatch.setenv("NEO4J_PASSWORD", "neo-secret")
+    monkeypatch.setenv("RABBITMQ_PASSWORD", "rabbit-secret")
     monkeypatch.setenv("HEALTH_CHECK_TIMEOUT", "3.5")
 
     settings = Settings()
@@ -31,6 +38,7 @@ def test_settings_are_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> 
 def test_secrets_are_not_printed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POSTGRES_PASSWORD", "pg-secret")
     monkeypatch.setenv("NEO4J_PASSWORD", "neo-secret")
+    monkeypatch.setenv("RABBITMQ_PASSWORD", "rabbit-secret")
 
     assert "pg-secret" not in repr(Settings())
 
@@ -43,6 +51,7 @@ def test_passwords_have_no_defaults() -> None:
 def test_health_timeout_must_be_positive(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POSTGRES_PASSWORD", "x")
     monkeypatch.setenv("NEO4J_PASSWORD", "x")
+    monkeypatch.setenv("RABBITMQ_PASSWORD", "x")
     monkeypatch.setenv("HEALTH_CHECK_TIMEOUT", "0")
 
     with pytest.raises(ValidationError, match="health_check_timeout"):
