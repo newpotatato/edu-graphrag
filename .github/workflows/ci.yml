@@ -94,6 +94,15 @@ jobs:
         options: >-
           --health-cmd "wget -q --spider http://localhost:7474 || exit 1"
           --health-interval 10s --health-timeout 5s --health-retries 15 --health-start-period 20s
+      rabbitmq:
+        image: rabbitmq:4.2-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: edu
+          RABBITMQ_DEFAULT_PASS: ci-only-password
+        ports: ["5672:5672", "15672:15672"]
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20 --health-start-period 10s
     env:
       POSTGRES_HOST: localhost
       POSTGRES_USER: edu
@@ -102,6 +111,9 @@ jobs:
       NEO4J_URI: bolt://localhost:7687
       NEO4J_USER: neo4j
       NEO4J_PASSWORD: ci-only-password
+      RABBITMQ_HOST: localhost
+      RABBITMQ_USER: edu
+      RABBITMQ_PASSWORD: ci-only-password
       # A freshly started Neo4j answers its first query slowly (JVM warm-up).
       HEALTH_CHECK_TIMEOUT: "10"
     steps:
@@ -111,6 +123,9 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
       - run: uv sync --locked
+      # Same step as the rabbitmq-init job in docker-compose.yml: exchanges, queues, policy.
+      - name: Declare RabbitMQ topology
+        run: uv run python -m edu_graphrag.pipeline.admin declare && uv run python -m edu_graphrag.pipeline.admin apply-policy
       - name: Unit + integration tests (fails below the coverage threshold)
         run: uv run pytest --integration --cov-report=xml --junitxml=junit.xml
       - name: Coverage summary

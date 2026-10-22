@@ -14,8 +14,8 @@ pytestmark = pytest.mark.integration
 @pytest.fixture
 def real_settings() -> Settings:
     settings = Settings()  # POSTGRES_* / NEO4J_* from the environment or .env
-    # These tests cover the databases; the MLflow model component has its own tests on a
-    # temporary sqlite store, so CI does not need a tracking server.
+    # These tests cover the databases and the broker; the MLflow model component has its
+    # own tests on a temporary sqlite store, so CI does not need a tracking server.
     settings.mlflow.model_enabled = False
     return settings
 
@@ -53,5 +53,5 @@ async def test_health_end_to_end(real_settings: Settings) -> None:
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "ok"
-    assert {c["name"] for c in body["components"]} == {"postgres", "neo4j"}
+    assert {c["name"] for c in body["components"]} == {"postgres", "neo4j", "rabbitmq"}
     assert all(c["version"] for c in body["components"])

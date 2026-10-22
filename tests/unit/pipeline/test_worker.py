@@ -254,10 +254,14 @@ async def test_inference_runs_off_the_event_loop_thread(harness: Harness) -> Non
     assert thread_id != threading.get_ident()
 
 
-def slow_model(seconds: float, started: threading.Event | None = None) -> FakePyfuncModel:
+def slow_model(
+    seconds: float, started: threading.Event | threading.Semaphore | None = None
+) -> FakePyfuncModel:
     def output(frame: pd.DataFrame) -> pd.DataFrame:
-        if started is not None:
+        if isinstance(started, threading.Event):
             started.set()
+        elif started is not None:
+            started.release()  # one permit per started inference
         time.sleep(seconds)  # blocking on purpose: it must not stall the event loop
         return pd.DataFrame({"label": ["x"] * len(frame), "confidence": [0.5] * len(frame)})
 
@@ -343,7 +347,7 @@ async def test_ready_is_503_before_startup(settings: Settings) -> None:
 
 
 async def test_graceful_shutdown_finishes_in_flight_tasks(settings: Settings) -> None:
-    started = threading.Event()
+    started = threading.Semaphore(0)
     worker, registry, store = make_worker(
         settings, model=slow_model(0.4, started), worker_concurrency=2
     )
@@ -361,7 +365,10 @@ async def test_graceful_shutdown_finishes_in_flight_tasks(settings: Settings) ->
                 )
                 for i in range(2)
             ]
-            await asyncio.to_thread(started.wait, 2)
+            # Wait until BOTH inferences are running, not just the first one: otherwise on a
+            # slow CI runner the shutdown may start before the second task was picked up.
+            for _ in range(2):
+                assert await asyncio.to_thread(started.acquire, True, 5)
             # Leaving TestApp runs the shutdown sequence while both tasks are in flight.
         # After shutdown: both finished, were committed and acked; resources released.
         assert all(p.done() for p in publishes)
