@@ -80,9 +80,9 @@ class RabbitComponent:
     async def _connect(self) -> None:
         connection = await self._connect_fn(self._url, timeout=self._connect_timeout)
         try:
-            # on_return_raises: an unroutable mandatory message raises instead of being "acked".
+            # on_return_raises (confirms only): an unroutable mandatory message raises instead of being "acked".
             channel = await connection.channel(
-                publisher_confirms=self._confirms, on_return_raises=True
+                publisher_confirms=self._confirms, on_return_raises=self._confirms
             )
             exchange = await channel.get_exchange(TASKS_EXCHANGE.name, ensure=False)
         except BaseException:

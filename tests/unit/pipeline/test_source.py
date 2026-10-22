@@ -2,12 +2,14 @@ import asyncio
 import csv
 import importlib
 import json
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from edu_graphrag.logging_config import configure_logging
 from edu_graphrag.pipeline.messages import TaskMessage
 from edu_graphrag.pipeline.publisher import (
     Backoff,
@@ -232,6 +234,11 @@ def test_rss_mb_without_psutil(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_run_file_logs_stats_and_writes_metrics(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    # structlog reaches caplog only through the stdlib bridge set up by configure_logging;
+    # without this the test passed only when an earlier test had configured logging.
+    configure_logging("INFO")
+    logging.getLogger().addHandler(caplog.handler)  # configure_logging replaced root handlers
+    caplog.set_level(logging.INFO)
     path = write_jsonl(tmp_path / "b.jsonl", [{"id": str(i), "text": "t"} for i in range(30)])
     metrics_path = tmp_path / "out" / "metrics.csv"
     metrics = MetricsCsv(metrics_path)
