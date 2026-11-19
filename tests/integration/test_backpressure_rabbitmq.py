@@ -35,8 +35,8 @@ MAX_DEPTH = LIMIT + 1
 
 @pytest.fixture(scope="module")
 def rabbit_settings() -> Iterator[RabbitSettings]:
-    container = RabbitMqContainer(IMAGE)
     try:
+        container = RabbitMqContainer(IMAGE).with_exposed_ports(15672)
         container.start()
     except Exception as exc:  # docker missing / daemon down / image cannot be pulled
         pytest.skip(f"Docker is unavailable, cannot start {IMAGE}: {type(exc).__name__}: {exc}")
@@ -44,6 +44,7 @@ def rabbit_settings() -> Iterator[RabbitSettings]:
         yield RabbitSettings(
             host=container.get_container_host_ip(),
             port=int(container.get_exposed_port(5672)),
+            management_port=int(container.get_exposed_port(15672)),
             user=container.username,
             password=SecretStr(container.password),
         )

@@ -1,0 +1,192 @@
+# Merge with -f docker-compose.yml -f observability/compose.yaml from the repo root.
+x-otel-env: &otel-env
+  OTEL_SDK_DISABLED: ${OBS_SDK_DISABLED:-true}
+  OTEL_TRACES_EXPORTER: ${OBS_TRACES_EXPORTER:-none}
+  OTEL_METRICS_EXPORTER: ${OBS_METRICS_EXPORTER:-none}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+  OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-1}
+  OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-always_on}
+  OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-deployment.environment.name=local}
+  OTEL_METRIC_EXPORT_INTERVAL: ${OTEL_METRIC_EXPORT_INTERVAL:-5000}
+  OTEL_METRIC_EXPORT_TIMEOUT: ${OTEL_METRIC_EXPORT_TIMEOUT:-1500}
+  OTEL_BSP_MAX_QUEUE_SIZE: ${OTEL_BSP_MAX_QUEUE_SIZE:-2048}
+  OTEL_BSP_MAX_EXPORT_BATCH_SIZE: ${OTEL_BSP_MAX_EXPORT_BATCH_SIZE:-256}
+
+services:
+  app:
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: edu-api
+      LOG_JSON: 'true'
+  worker:
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: edu-worker
+      MODEL_NAME: ${OBS_MODEL_NAME:-${MODEL_NAME:-subject-classifier}}
+      MODEL_ALIAS: ${OBS_MODEL_ALIAS:-${MODEL_ALIAS:-champion}}
+      LOG_JSON: 'true'
+      DLQ_RECORDER_ENABLED: ${DLQ_RECORDER_ENABLED:-false}
+      TELEMETRY_DLQ_TAP: ${TELEMETRY_DLQ_TAP:-true}
+      TELEMETRY_DEMO_POISON_ID: ${TELEMETRY_DEMO_POISON_ID:-}
+  source:
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: edu-source
+      TELEMETRY_LOG_DRAIN_SECONDS: ${OBS_LOG_DRAIN_SECONDS:-0}
+  rabbitmq:
+    configs:
+      - source: rabbitmq-observability-plugins
+        target: /etc/rabbitmq/enabled_plugins
+
+  alloy:
+    build:
+      context: ./observability
+      dockerfile: Probe.Dockerfile
+      target: alloy
+    image: edu-alloy:1.10.2-probe
+    profiles: [logs, observability]
+    command: [run, --storage.path=/var/lib/alloy, /etc/alloy/config.alloy]
+    environment:
+      COMPOSE_PROJECT_FILTER: ${COMPOSE_PROJECT_NAME:-edu-graphrag}
+    volumes:
+      - ./observability/alloy.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-state:/var/lib/alloy
+    networks: [backend]
+    mem_limit: 160m
+    healthcheck:
+      test: [CMD, /bin/busybox, wget, -qO, /dev/null, http://127.0.0.1:12345/-/ready]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    depends_on:
+      loki:
+        condition: service_healthy
+
+  loki:
+    image: grafana/loki:3.5.3
+    profiles: [logs, observability]
+    command: [-config.file=/etc/loki/lab.yaml]
+    volumes:
+      - ./observability/loki.yaml:/etc/loki/lab.yaml:ro
+      - loki-data:/loki
+    networks: [backend]
+    mem_limit: 256m
+    healthcheck:
+      test: [CMD, wget, -qO, /dev/null, http://127.0.0.1:3100/ready]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  otel-collector:
+    build:
+      context: ./observability
+      dockerfile: Probe.Dockerfile
+      target: collector
+    image: edu-otel-collector:0.130.1-probe
+    profiles: [traces, metrics, observability]
+    command:
+      - --config=/etc/otel/base.yaml
+      - --config=/etc/otel/${OBS_COLLECTOR_MODE:-full}.yaml
+    volumes:
+      - ./observability/collector:/etc/otel:ro
+    networks: [backend]
+    mem_limit: 192m
+    healthcheck:
+      # Collector internal telemetry is local to this container; not a test of backends.
+      test: [CMD, /bin/busybox, wget, -qO, /dev/null, http://127.0.0.1:8888/metrics]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  tempo:
+    build:
+      context: ./observability
+      dockerfile: Probe.Dockerfile
+      target: tempo
+    image: edu-tempo:2.8.2-probe
+    profiles: [traces, observability]
+    command: [-config.file=/etc/tempo/lab.yaml]
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo/lab.yaml:ro
+      - tempo-data:/var/tempo
+    networks: [backend]
+    mem_limit: 256m
+    healthcheck:
+      test: [CMD, /bin/busybox, wget, -qO, /dev/null, http://127.0.0.1:3200/ready]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [metrics, observability]
+    command:
+      - --config.file=/etc/prometheus/lab.yaml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2d
+      - --storage.tsdb.retention.size=250MB
+      - --web.enable-otlp-receiver
+    volumes:
+      - ./observability/prometheus.yaml:/etc/prometheus/lab.yaml:ro
+      - prometheus-data:/prometheus
+    networks: [backend]
+    mem_limit: 384m
+    healthcheck:
+      test: [CMD, wget, -qO, /dev/null, http://127.0.0.1:9090/-/ready]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    profiles: [observability]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-lab-local-change-me}
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: 'false'
+    ports:
+      - '127.0.0.1:${GRAFANA_PORT:-3000}:3000'
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks: [backend]
+    mem_limit: 256m
+    healthcheck:
+      test: [CMD, wget, -qO, /dev/null, http://127.0.0.1:3000/api/health]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  demo-seed:
+    image: ${APP_IMAGE:-edu-graphrag:local}
+    profiles: [demo]
+    env_file: .env
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_ENABLE_PROXY_MULTIPART_UPLOAD: 'false'
+      MLFLOW_ENABLE_PROXY_MULTIPART_DOWNLOAD: 'false'
+      MLFLOW_CONFIGURE_LOGGING: 'false'
+      MLFLOW_ENABLE_ARTIFACTS_PROGRESS_BAR: 'false'
+      MLFLOW_DISABLE_AGENT_HINT: '1'
+      MODEL_NAME: demo-subject-classifier
+    command: [python, -m, edu_graphrag.pipeline.observability_demo, seed]
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    networks: [backend]
+    mem_limit: 768m
+
+configs:
+  rabbitmq-observability-plugins:
+    content: '[rabbitmq_management,rabbitmq_prometheus].'
+
+volumes:
+  alloy-state:
+  loki-data:
+  tempo-data:
+  prometheus-data:
+  grafana-data:

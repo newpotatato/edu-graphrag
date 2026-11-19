@@ -55,11 +55,12 @@ async def test_access_log_is_structured(
 ) -> None:
     # The app is created inside the test so its log handler writes to the captured stdout.
     async with make_client([]) as client:
-        await client.get("/healthz", headers={"X-Request-ID": "trace-7"})
+        await client.get("/healthz")
+        await client.get("/api/v1/version", headers={"X-Request-ID": "trace-7"})
 
     records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    access = next(r for r in records if r["event"] == "request_finished")
+    (access,) = [r for r in records if r["event"] == "request_finished"]
     assert access["request_id"] == "trace-7"
-    assert access["path"] == "/healthz"
+    assert access["path"] == "/api/v1/version"
     assert access["status_code"] == 200
     assert access["duration_ms"] >= 0

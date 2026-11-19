@@ -1,0 +1,72 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: edu-pipeline
+    folder: Edu GraphRAG
+    interval: 10s
+    rules:
+      - uid: edu-queue-saturation
+        title: Очередь задач держится выше 90% лимита
+        condition: B
+        for: 1m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: Ready > 90% лимита в течение минуты; проверьте темп обработки и NACK.
+        labels: {service: rabbitmq, severity: warning}
+        data:
+          - refId: A
+            relativeTimeRange: {from: 300, to: 0}
+            datasourceUid: edu-prometheus
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: 'max(rabbitmq_queue_messages_ready{queue="tasks"}) / max(edu_queue_limit{queue="tasks"} > 0)'
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              datasource: {type: __expr__, uid: __expr__}
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0.9]}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {type: last, params: []}
+                  type: query
+      - uid: edu-dead-letters
+        title: В DLQ остались необработанные сообщения
+        condition: B
+        for: 20s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: В tasks.dlq есть сообщение; откройте dead_letter_arrived в Loki.
+        labels: {service: rabbitmq, severity: warning}
+        data:
+          - refId: A
+            relativeTimeRange: {from: 300, to: 0}
+            datasourceUid: edu-prometheus
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: 'max(rabbitmq_queue_messages{queue="tasks.dlq"})'
+          - refId: B
+            relativeTimeRange: {from: 0, to: 0}
+            datasourceUid: __expr__
+            model:
+              refId: B
+              datasource: {type: __expr__, uid: __expr__}
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+                  operator: {type: and}
+                  query: {params: [B]}
+                  reducer: {type: last, params: []}
+                  type: query

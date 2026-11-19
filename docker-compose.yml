@@ -27,10 +27,14 @@ services:
       # Keep artifact transfers proxied through the server (see the mlflow service).
       MLFLOW_ENABLE_PROXY_MULTIPART_UPLOAD: "false"
       MLFLOW_ENABLE_PROXY_MULTIPART_DOWNLOAD: "false"
+      MLFLOW_CONFIGURE_LOGGING: "false"
+      MLFLOW_ENABLE_ARTIFACTS_PROGRESS_BAR: "false"
+      MLFLOW_DISABLE_AGENT_HINT: "1"
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: "5672"
+      RABBITMQ_MANAGEMENT_PORT: "15672"
     ports:
-      - "${APP_PORT:-8000}:8000"
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -95,8 +99,8 @@ services:
     volumes:
       - neo4j-data:/data
     ports:
-      - "127.0.0.1:7474:7474"  # browser UI
-      - "127.0.0.1:7687:7687"  # bolt
+      - "127.0.0.1:${NEO4J_HTTP_PORT:-7474}:7474"  # browser UI
+      - "127.0.0.1:${NEO4J_BOLT_PORT:-7687}:7687"  # bolt
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
       interval: 10s
@@ -143,7 +147,7 @@ services:
       # and are not needed for experiment tracking and the model registry.
       MLFLOW_SERVER_ENABLE_JOB_EXECUTION: "false"
     ports:
-      - "${MLFLOW_PORT:-5000}:5000"  # UI + REST API
+      - "127.0.0.1:${MLFLOW_PORT:-5000}:5000"  # UI + REST API
     depends_on:
       mlflow-db:
         condition: service_healthy
@@ -203,7 +207,7 @@ services:
       - seaweedfs-data:/data
     ports:
       # Localhost only, for debugging: clients go through the MLflow server.
-      - "127.0.0.1:8333:8333"  # S3 API
+      - "127.0.0.1:${SEAWEEDFS_PORT:-8333}:8333"  # S3 API
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8333/healthz || exit 1"]
       interval: 10s
@@ -298,6 +302,7 @@ services:
     env_file: .env
     environment:
       RABBITMQ_HOST: rabbitmq
+      RABBITMQ_MANAGEMENT_PORT: "15672"
     command: ["sh", "-c", "python -m edu_graphrag.pipeline.admin declare && python -m edu_graphrag.pipeline.admin apply-policy"]
     depends_on:
       rabbitmq:
@@ -330,11 +335,14 @@ services:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_ENABLE_PROXY_MULTIPART_UPLOAD: "false"
       MLFLOW_ENABLE_PROXY_MULTIPART_DOWNLOAD: "false"
+      MLFLOW_CONFIGURE_LOGGING: "false"
+      MLFLOW_ENABLE_ARTIFACTS_PROGRESS_BAR: "false"
+      MLFLOW_DISABLE_AGENT_HINT: "1"
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
       INFERENCE_DELAY_MS: ${INFERENCE_DELAY_MS:-200}
     command: ["uvicorn", "edu_graphrag.pipeline.worker:create_app", "--factory", "--host", "0.0.0.0", "--port", "8001", "--no-access-log"]
     ports:
-      - "127.0.0.1:8101-8104:8001"
+      - "127.0.0.1:${WORKER_PORT_RANGE:-8101-8104}:8001"
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -347,7 +355,7 @@ services:
       mlflow:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/ready', timeout=2)"]
       interval: 10s
       timeout: 3s
       start_period: 30s
@@ -362,6 +370,26 @@ services:
         limits:
           cpus: "1.0"
           memory: 512M
+    logging: *default-logging
+
+  # Explicit one-shot job: docker compose run source --file /input/batch.jsonl
+  source:
+    image: ${APP_IMAGE:-edu-graphrag:local}
+    profiles: [batch]
+    env_file: .env
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+    entrypoint: [python, -m, edu_graphrag.pipeline.source]
+    volumes:
+      - ${SOURCE_INPUT_DIR:-./data/tasks}:/input:ro
+    depends_on:
+      rabbitmq-init:
+        condition: service_completed_successfully
+    networks: [backend]
+    mem_limit: 256m
+    healthcheck:
+      disable: true # one-shot source does not run an HTTP server
     logging: *default-logging
 
 # S3 identities, rendered from .env (no anonymous access: requests must be signed).

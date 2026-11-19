@@ -49,6 +49,7 @@ import structlog
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from edu_graphrag import telemetry
 from edu_graphrag.components.postgres import PostgresComponent
 from edu_graphrag.config import PipelineSettings
 from edu_graphrag.pipeline import store
@@ -147,6 +148,7 @@ class TaskService:
 
     async def submit(self, text: str) -> TaskMessage:
         message = TaskMessage.new(text, source="api")
+        telemetry.bind_task(str(message.task_id))
         published = False
         try:
             async with self._store.transaction() as tx:
@@ -154,6 +156,7 @@ class TaskService:
                 await self._publisher.publish(message, confirm_timeout=self._confirm_timeout)
                 published = True
         except PublishError as exc:
+            telemetry.failure(telemetry.get_current_span(), exc, reason=type(exc).__name__)
             retry_after = await self.retry_after(exc)
             logger.warning(
                 "task_shed",
@@ -171,7 +174,7 @@ class TaskService:
             ) from exc
         except StoreUnavailableError as exc:
             if not published:
-                logger.error("task_store_unavailable", error=str(exc))
+                logger.error("task_store_unavailable", exc_info=exc)
                 raise TaskRejectedError(
                     "Task store is unavailable",
                     "The task was not accepted: the database is unavailable.",

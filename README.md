@@ -6,14 +6,17 @@
 Мультимодальный GraphRAG-агрегатор учебных материалов (PDF, презентации, видеолекции, код)
 с общим графом курса (EduKG) и персональным графом знаний студента (PKG).
 
-Сейчас в репозитории — каркас сервиса: асинхронное API, подключение к PostgreSQL и Neo4j,
-тесты, Docker-образ и CI/CD, публикующий версионированный образ в GitHub Container Registry;
-ML-пайплайн на MLflow: датасет → эксперименты → Model Registry → `POST /api/v1/process`
-(подробно — [docs/mlflow.md](docs/mlflow.md)).
+Сейчас в репозитории — асинхронный конвейер классификации: `POST /api/v1/tasks` принимает
+задачу, RabbitMQ доставляет её FastStream-воркеру, воркер выполняет модель из MLflow Registry
+и подтверждает доставку после коммита в PostgreSQL. BM25 и структурный чанкинг реализованы как
+ML-эксперименты; поиск по конспектам через API и графовое расширение пока не подключены.
 
-**Стек:** Python 3.12 · FastAPI · SQLAlchemy 2 (asyncpg) + Alembic · Neo4j async driver ·
-structlog · uv · ruff · mypy · pytest · Docker · GitHub Actions · GHCR ·
-MLflow 3 (Postgres + SeaweedFS S3) · scikit-learn · BM25
+- [ДЗ 5: наблюдаемость и сценарий защиты](docs/observability.md)
+- [ДЗ 4: RabbitMQ, очереди и backpressure](docs/messaging-theory.md)
+- [ДЗ 3: эксперименты и MLflow Registry](docs/mlflow.md) (`/process` относится к снимку ДЗ 3)
+
+**Стек:** Python 3.12 · FastAPI · PostgreSQL + Alembic · Neo4j · RabbitMQ + FastStream ·
+MLflow + SeaweedFS · scikit-learn · BM25 · structlog · OpenTelemetry · Grafana · Docker · GHCR
 
 ---
 
@@ -24,9 +27,9 @@ MLflow 3 (Postgres + SeaweedFS S3) · scikit-learn · BM25
 
 ```bash
 just setup        # uv sync + установка pre-commit хуков
-just env          # .env из .env.example -> впишите POSTGRES_PASSWORD и NEO4J_PASSWORD
-just up           # собрать образ и поднять app + postgres + neo4j, дождаться healthy
-just smoke        # дёрнуть все эндпоинты
+just env          # .env из .env.example, заполните пароли и ключи
+just up           # бизнес-стек; worker нужен зарегистрированный MODEL_NAME@MODEL_ALIAS
+just smoke        # проверить API
 ```
 
 Без just: `uv sync && cp .env.example .env && docker compose up --build -d --wait`.
@@ -46,6 +49,11 @@ just smoke        # дёрнуть все эндпоинты
 
 Swagger UI: <http://localhost:8000/docs>, Neo4j Browser: <http://localhost:7474>.
 
+**Чистый демостенд ДЗ 5:** `just obs demo-up` после заполнения `.env`. Команда создаёт отдельный
+Compose-проект, регистрирует синтетическую модель и запускает Grafana на
+<http://127.0.0.1:13000>. Если нужен существующий Registry, используйте `just obs up observability`.
+Команды для пачки, отказов и отключения мониторинга — в [инструкции](docs/observability.md).
+
 ---
 
 ## Эндпоинты
@@ -54,9 +62,10 @@ Swagger UI: <http://localhost:8000/docs>, Neo4j Browser: <http://localhost:7474>
 |---|---|
 | `GET /healthz` | liveness: процесс жив и отвечает. **Не ходит в БД** |
 | `GET /api/v1/version` | версия приложения и коммит, из которого собран образ |
-| `GET /api/v1/health` | end-to-end проверка: версия и время ответа каждого компонента (вкл. модель из MLflow) |
-| `POST /api/v1/process` | инференс моделью из MLflow Model Registry, загруженной при старте |
-| `GET /api/v1/model` | какая версия модели обслуживается (name, alias, version, run_id) |
+| `GET /api/v1/health` | состояние зависимостей API, не проверяет загруженную модель воркера |
+| `POST /api/v1/tasks` | поставить задачу в очередь: `202` + `Location` или `503` + `Retry-After` |
+| `GET /api/v1/tasks/{task_id}` | состояние задачи и результат с фактической версией модели |
+| `GET /ready` на порту воркера | загружена ли модель и доступен ли брокер |
 
 ```jsonc
 // GET /api/v1/health -> 200, или 503 если хоть что-то лежит (тело то же, с причиной)
@@ -167,17 +176,11 @@ scripts/smoke.py       # проверка эндпоинтов запущенн�
 
 ## Логирование
 
-structlog, одна JSON-строка на событие в stdout (12-factor: сбор логов — забота инфраструктуры).
-Логи uvicorn и драйверов идут через тот же форматтер. Каждый запрос получает `request_id`
-(берётся из `X-Request-ID` или генерируется, возвращается в ответе) — он автоматически
-попадает во все логи этого запроса.
-
-```json
-{"component": "neo4j", "status": "up", "version": "5.26.31", "latency_ms": 53.93, "event": "component_checked", "request_id": "659806cd...", "level": "info", "logger": "edu_graphrag.services.health", "timestamp": "2026-09-24T20:45:37.10Z"}
-{"method": "GET", "path": "/api/v1/health", "status_code": 200, "duration_ms": 61.2, "event": "request_finished", "request_id": "659806cd...", "level": "info", "logger": "edu_graphrag.middleware", "timestamp": "2026-09-24T20:45:37.11Z"}
-```
-
-`LOG_JSON=false` — цветной человекочитаемый вывод для локальной отладки.
+JSON-строка на событие в stdout. В HTTP-логах есть `request_id`, в логах задачи — `task_id`,
+а при активном спане — `trace_id` и `span_id`. Воркер восстанавливает контекст по `traceparent`
+и AMQP `correlation_id`. Успешные health-пробы не создают access-лог и не попадают в HTTP-трейсы.
+`LOG_LEVEL` задаёт уровень; `LOG_JSON=false` переключает API на консольный формат для локальной
+отладки. В профилях наблюдаемости сервисы пишут JSON.
 
 ---
 

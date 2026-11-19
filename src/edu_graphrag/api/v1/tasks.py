@@ -11,6 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
+from edu_graphrag import telemetry
 from edu_graphrag.api.deps import TaskServiceDep
 from edu_graphrag.api.task_service import (
     STORE_RETRY_AFTER,
@@ -106,6 +107,7 @@ async def create_task(
 async def get_task(task_id: UUID, service: TaskServiceDep) -> TaskStatusResponse | JSONResponse:
     """`pending` while queued or running, then `done` (with the result and the model version
     that produced it) or `failed` (dead-lettered after the delivery limit, with the error)."""
+    telemetry.bind_task(str(task_id))
     try:
         record = await service.get(task_id)
     except StoreUnavailableError:

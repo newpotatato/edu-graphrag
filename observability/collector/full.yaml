@@ -1,0 +1,38 @@
+exporters:
+  otlphttp/tempo:
+    endpoint: http://tempo:4318
+    timeout: 2s
+    sending_queue:
+      enabled: true
+      queue_size: 64
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 10s
+  otlphttp/prometheus:
+    metrics_endpoint: http://prometheus:9090/api/v1/otlp/v1/metrics
+    timeout: 2s
+    sending_queue:
+      enabled: true
+      queue_size: 64
+      num_consumers: 1
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 10s
+service:
+  pipelines:
+    traces:
+      receivers:
+      - otlp
+      processors:
+      - memory_limiter
+      - batch
+      exporters:
+      - otlphttp/tempo
+    metrics:
+      receivers:
+      - otlp
+      processors:
+      - memory_limiter
+      - batch
+      exporters:
+      - otlphttp/prometheus
