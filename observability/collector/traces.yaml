@@ -1,0 +1,12 @@
+exporters:
+  otlphttp/tempo:
+    endpoint: http://tempo:4318
+    timeout: 2s
+    sending_queue: {enabled: true, queue_size: 64}
+    retry_on_failure: {enabled: true, max_elapsed_time: 10s}
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/tempo]

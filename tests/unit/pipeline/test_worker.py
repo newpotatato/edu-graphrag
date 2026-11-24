@@ -452,13 +452,13 @@ def test_create_app_wires_real_dependencies(
 ) -> None:
     from edu_graphrag.pipeline import worker as worker_module
 
-    logging_calls: list[tuple[str, bool]] = []
+    logging_calls: list[tuple[str, bool, str]] = []
     monkeypatch.setattr(worker_module, "get_settings", lambda: settings)
     monkeypatch.setattr(
         worker_module,
         "configure_logging",
-        lambda level, *, json_logs: logging_calls.append((level, json_logs)),
+        lambda level, *, json_logs, service: logging_calls.append((level, json_logs, service)),
     )
     app = worker_module.create_app()
     assert app.broker is not None
-    assert logging_calls == [(settings.log_level, settings.log_json)]
+    assert logging_calls == [(settings.log_level, settings.log_json, "edu-worker")]

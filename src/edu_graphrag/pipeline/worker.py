@@ -67,20 +67,24 @@ Compose's `stop_grace_period` (30 s) is longer than the graceful timeout (20 s).
 import json
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 from faststream.asgi import AsgiFastStream, AsgiResponse, get
 from faststream.exceptions import NackMessage, RejectMessage
 from faststream.middlewares import AckPolicy
-from faststream.rabbit import RabbitBroker
+from faststream.rabbit import RabbitBroker, RabbitQueue
 from faststream.rabbit.annotations import RabbitMessage
 from faststream.rabbit.schemas import Channel
+from opentelemetry.trace import SpanKind
 from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from edu_graphrag import telemetry
 from edu_graphrag.components.mlflow_model import MlflowModelRegistry, ModelRegistry
 from edu_graphrag.config import Settings, get_settings
 from edu_graphrag.logging_config import configure_logging
@@ -96,6 +100,9 @@ from edu_graphrag.pipeline.worker_store import PostgresTaskStore, TaskStore
 
 logger = structlog.get_logger(__name__)
 
+DLQ_TAP = RabbitQueue(
+    "tasks.telemetry.dlx", arguments={"x-max-length": 200, "x-message-ttl": 60000}
+)
 DELIVERY_COUNT_HEADER = "x-delivery-count"
 _FASTSTREAM_LOGGER = logging.getLogger("edu_graphrag.faststream")
 
@@ -107,6 +114,8 @@ class WorkerSettings(BaseSettings):
     worker_graceful_timeout: float = Field(default=20.0, gt=0)
     # Drain tasks.dlq into Postgres. Off: dead letters stay in the queue for inspection.
     dlq_recorder_enabled: bool = False
+    telemetry_dlq_tap: bool = False
+    telemetry_demo_poison_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,11 +138,14 @@ def delivery_attempt(headers: Mapping[str, Any]) -> int:
 def death_reason(headers: Mapping[str, Any]) -> str:
     """Why the broker dead-lettered a message: `rejected`, `delivery_limit`, `maxlen`..."""
     reason = headers.get("x-first-death-reason")
-    if reason:
-        return str(reason)
-    deaths = headers.get("x-death")
-    if isinstance(deaths, list) and deaths and isinstance(deaths[0], Mapping):
-        return str(deaths[0].get("reason", "unknown"))
+    if not reason:
+        deaths = headers.get("x-death")
+        if isinstance(deaths, list) and deaths and isinstance(deaths[0], Mapping):
+            reason = deaths[0].get("reason")
+    if isinstance(reason, bytes):
+        reason = reason.decode("ascii", errors="replace")
+    if isinstance(reason, str) and reason in {"rejected", "expired", "maxlen", "delivery_limit"}:
+        return reason
     return "unknown"
 
 
@@ -183,12 +195,23 @@ class Worker:
                 ack_policy=AckPolicy.NACK_ON_ERROR,
                 title="tasks.dlq",
             )(self.record_dead_letter)
+        elif self._worker_settings.telemetry_dlq_tap:
+            self.broker.subscriber(DLQ_TAP, DEAD_LETTER_EXCHANGE, title=DLQ_TAP.name)(
+                self.tap_dead_letter
+            )
+
+        @asynccontextmanager
+        async def lifespan() -> AsyncIterator[None]:
+            async with telemetry.running("edu-worker"):
+                yield
 
         self.app = AsgiFastStream(
             self.broker,
             asgi_routes=[("/health", get(self.health)), ("/ready", get(self.ready))],
             logger=_FASTSTREAM_LOGGER,
+            lifespan=lifespan,
             on_startup=[self._on_startup],
+            on_shutdown=[self._on_shutdown],
             after_shutdown=[self._after_shutdown],
         )
 
@@ -196,8 +219,15 @@ class Worker:
 
     async def _on_startup(self) -> None:
         # Before the broker starts consuming: no message is handled without the model.
-        await self.engine.start()
+        try:
+            await self.engine.start()
+        except Exception as exc:
+            logger.error("model_load_failed", model_uri=self.engine.uri, exc_info=exc)
+            await self.engine.shutdown()
+            await self._store.close()
+            raise RuntimeError(f"Model unavailable: {type(exc).__name__}") from None
         await self.declare_dead_lettering()
+        telemetry.gauge("edu_worker_in_flight", 0)
         logger.info(
             "worker_started",
             model_uri=self.engine.uri,
@@ -217,6 +247,9 @@ class Worker:
         queue = await self.broker.declare_queue(DEAD_LETTER_QUEUE)
         await queue.bind(exchange, routing_key=DEAD_LETTER_QUEUE.routing())
 
+    async def _on_shutdown(self) -> None:
+        logger.info("worker_shutdown_started", in_flight=self._in_flight)
+
     async def _after_shutdown(self) -> None:
         # The broker has stopped (in-flight handlers finished or timed out): now wait for
         # any inference thread still running and release resources.
@@ -228,72 +261,119 @@ class Worker:
 
     async def handle_task(self, message: RabbitMessage) -> None:
         attempt = delivery_attempt(message.headers)
-        try:
-            task = TaskMessage.model_validate_json(message.body)
-        except ValidationError as exc:
-            logger.warning(
-                "poison_message",
-                message_id=message.message_id,
-                attempt=attempt,
-                error=str(exc).splitlines()[0],
-            )
-            # requeue=False: dead-lettered at once, retrying cannot fix the payload.
-            raise RejectMessage(requeue=False) from exc
+        correlation = telemetry.task_uuid(message.raw_message.correlation_id or message.message_id)
+        attrs: telemetry.Attrs = {
+            "messaging.system": "rabbitmq",
+            "messaging.destination.name": TASKS_QUEUE.name,
+            "messaging.delivery.attempt": attempt,
+        }
+        with (
+            structlog.contextvars.bound_contextvars(task_id=correlation, attempt=attempt),
+            telemetry.span(
+                "process",
+                attrs,
+                kind=SpanKind.CONSUMER,
+                parent=telemetry.extract_headers(message.headers),
+            ) as current,
+        ):
+            if correlation:
+                telemetry.bind_task(correlation, attempt=attempt)
+            age = telemetry.delivery_age(message.headers)
+            if age is not None:
+                current.set_attribute("messaging.publish_to_delivery.seconds", age)
+            if attempt > 1:
+                telemetry.count("edu_worker_redeliveries")
+            try:
+                task = TaskMessage.model_validate_json(message.body)
+            except ValidationError as exc:
+                logger.warning("poison_message", exc_info=exc)
+                current.add_event("dead_letter.requested", {"reason": "rejected"})
+                telemetry.count("edu_worker_tasks", attrs={"outcome": "error"})
+                raise RejectMessage(requeue=False) from exc
 
-        log = logger.bind(task_id=str(task.task_id), attempt=attempt)
-        self._in_flight += 1
-        started = time.perf_counter()
-        try:
-            result = await self.engine.predict(task.text)
-            ref = self.engine.ref
-            saved = await self._store.save_result(
-                task,
-                result=result,
-                model_name=ref.name,
-                model_version=ref.version,
-                attempts=attempt,
-            )
-        except Exception as exc:
-            await self._on_transient_error(task, attempt, exc, log)
-            raise NackMessage(requeue=True) from exc
-        finally:
-            self._in_flight -= 1
+            telemetry.bind_task(str(task.task_id), attempt=attempt)
+            self._in_flight += 1
+            telemetry.gauge("edu_worker_in_flight", self._in_flight)
+            started = time.perf_counter()
+            try:
+                if self._worker_settings.telemetry_demo_poison_id == str(task.task_id):
+                    raise RuntimeError("demonstration processing failure")
+                result = await self.engine.predict(task.text)
+                ref = self.engine.ref
+                with telemetry.span("db.save_result", {"db.system.name": "postgresql"}):
+                    saved = await self._store.save_result(
+                        task,
+                        result=result,
+                        model_name=ref.name,
+                        model_version=ref.version,
+                        attempts=attempt,
+                    )
+            except Exception as exc:
+                final = attempt > self.delivery_limit
+                if final:
+                    current.add_event("dead_letter.requested", {"reason": "delivery_limit"})
+                telemetry.count("edu_worker_tasks", attrs={"outcome": "error"})
+                await self._on_processing_error(task, final, exc)
+                raise NackMessage(requeue=True) from exc
+            finally:
+                self._in_flight -= 1
+                telemetry.gauge("edu_worker_in_flight", self._in_flight)
 
-        duration_ms = round((time.perf_counter() - started) * 1000, 2)
-        if saved:
-            log.info("task_done", label=result.get("label"), duration_ms=duration_ms)
-        else:
-            log.info("duplicate_delivery", duration_ms=duration_ms)
-        # Returning acks the message: the result is already committed.
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            if saved:
+                submitted = task.submitted_at
+                if submitted.tzinfo is None:
+                    submitted = submitted.replace(tzinfo=UTC)
+                elapsed = (datetime.now(UTC) - submitted).total_seconds()
+                telemetry.count("edu_worker_tasks", attrs={"outcome": "ok"})
+                telemetry.observe(
+                    "edu_worker_task_duration", max(elapsed, 0.0), telemetry.TASK_BUCKETS
+                )
+                logger.info("task_done", duration_ms=duration_ms, model_version=ref.version)
+            else:
+                logger.info("duplicate_delivery", duration_ms=duration_ms)
+            # Returning acks the message: the result is already committed.
 
-    async def _on_transient_error(
-        self,
-        task: TaskMessage,
-        attempt: int,
-        exc: Exception,
-        log: structlog.stdlib.BoundLogger,
-    ) -> None:
-        error = f"{type(exc).__name__}: {exc}"
-        # delivery-limit=N allows N+1 deliveries; on the last one the broker dead-letters.
-        final = attempt > self.delivery_limit
-        log.warning("task_failed", error=error, final_attempt=final, requeue=True)
+    async def _on_processing_error(self, task: TaskMessage, final: bool, exc: Exception) -> None:
+        logger.error("task_failed", final_attempt=final, requeue=True, exc_info=exc)
         if not final:
             return
         try:
-            await self._store.mark_failed(task, f"delivery limit reached: {error}")
+            await self._store.mark_failed(task, f"delivery limit reached: {type(exc).__name__}")
         except Exception as store_exc:  # best effort: the DB may be what is failing
-            log.error("mark_failed_error", error=f"{type(store_exc).__name__}: {store_exc}")
+            logger.error("mark_failed_error", exc_info=store_exc)
+
+    async def tap_dead_letter(self, message: RabbitMessage) -> None:
+        await self._handle_dead_letter(message, persist=False)
 
     async def record_dead_letter(self, message: RabbitMessage) -> None:
+        await self._handle_dead_letter(message, persist=True)
+
+    async def _handle_dead_letter(self, message: RabbitMessage, *, persist: bool) -> None:
         reason = death_reason(message.headers)
-        try:
-            task = TaskMessage.model_validate_json(message.body)
-        except ValidationError:
-            # Nothing to attach the failure to: there is no valid task_id.
-            logger.warning("dead_letter_unparseable", reason=reason, body=message.body[:200])
-            return
-        await self._store.mark_failed(task, f"dead-lettered: {reason}")
-        logger.info("dead_letter_recorded", task_id=str(task.task_id), reason=reason)
+        correlation = telemetry.task_uuid(message.raw_message.correlation_id or message.message_id)
+        with (
+            structlog.contextvars.bound_contextvars(task_id=correlation),
+            telemetry.span(
+                "dead_letter",
+                {"messaging.dead_letter.reason": reason},
+                kind=SpanKind.CONSUMER,
+                parent=telemetry.extract_headers(message.headers),
+            ) as current,
+        ):
+            if correlation:
+                telemetry.bind_task(correlation)
+            telemetry.failure(current, reason="Dead-lettered")
+            try:
+                task = TaskMessage.model_validate_json(message.body)
+            except ValidationError:
+                logger.warning("dead_letter_unparseable", reason=reason)
+            else:
+                telemetry.bind_task(str(task.task_id))
+                if persist:
+                    await self._store.mark_failed(task, f"dead-lettered: {reason}")
+            telemetry.count("edu_worker_tasks", attrs={"outcome": "dlq"})
+            logger.warning("dead_letter_arrived", reason=reason, diagnostic_copy=not persist)
 
     # ---------- HTTP ----------
 
@@ -355,7 +435,7 @@ def build_worker(
 def create_app() -> AsgiFastStream:
     """ASGI factory for uvicorn (`--factory`)."""
     settings = get_settings()
-    configure_logging(settings.log_level, json_logs=settings.log_json)
+    configure_logging(settings.log_level, json_logs=settings.log_json, service="edu-worker")
     return build_worker(settings).app
 
 

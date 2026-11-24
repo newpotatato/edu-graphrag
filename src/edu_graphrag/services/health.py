@@ -32,8 +32,8 @@ async def check_component(component: Component, per_check_timeout: float) -> Com
         latency_ms=latency_ms,
         error=error,
     )
-    log = logger.info if error is None else logger.warning
-    log("component_checked", component=result.name, **result.model_dump(exclude={"name"}))
+    log = logger.debug if error is None else logger.warning
+    log("component_checked", component=result.name, **result.model_dump(exclude={"name", "error"}))
     return result
 
 

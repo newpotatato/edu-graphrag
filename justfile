@@ -144,3 +144,8 @@ release bump="patch":
     git commit -m "chore(release): v$(uv version --short)"
     git tag -a "v$(uv version --short)" -m "v$(uv version --short)"
     git push --follow-tags
+
+# Observability modes and isolated local defense demo (see docs/observability.md).
+
+obs action *args:
+    uv run --no-project python scripts/observability.py {{ action }} {{ args }}

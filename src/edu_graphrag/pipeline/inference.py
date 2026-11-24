@@ -19,6 +19,7 @@ import asyncio
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -26,6 +27,7 @@ from typing import Any
 import pandas as pd
 import structlog
 
+from edu_graphrag import telemetry
 from edu_graphrag.components.mlflow_model import (
     TEXT_COLUMN,
     ModelNotLoadedError,
@@ -121,6 +123,7 @@ class InferenceEngine:
         logger.info(
             "model_loaded",
             model_uri=self.uri,
+            model_alias=ref.alias,
             model_version=ref.version,
             run_id=ref.run_id,
             duration_ms=round((time.perf_counter() - started) * 1000, 2),
@@ -131,7 +134,25 @@ class InferenceEngine:
         if self._executor is None or self._model is None:
             raise ModelNotLoadedError(f"model {self.uri} is not loaded")
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, self._predict_blocking, self._model, text)
+        return await loop.run_in_executor(
+            self._executor, copy_context().run, self._predict_traced, self._model, text
+        )
+
+    def _predict_traced(self, model: PyfuncModel, text: str) -> dict[str, Any]:
+        ref = self.ref
+        started = time.perf_counter()
+        with telemetry.span(
+            "inference",
+            {"model.alias": ref.alias, "model.version": ref.version, "model.name": ref.name},
+        ):
+            try:
+                return self._predict_blocking(model, text)
+            finally:
+                telemetry.observe(
+                    "edu_worker_inference_duration",
+                    time.perf_counter() - started,
+                    telemetry.inference_buckets(self._delay_s),
+                )
 
     def _predict_blocking(self, model: PyfuncModel, text: str) -> dict[str, Any]:
         """Runs in an inference thread: blocking calls are fine here, never in async code."""

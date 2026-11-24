@@ -44,12 +44,14 @@ number of unconfirmed messages is bounded by the caller (see `pipeline.source`).
 
 import asyncio
 import random
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
 import structlog
 
+from edu_graphrag import telemetry
 from edu_graphrag.pipeline.messages import TaskMessage
 
 logger = structlog.get_logger(__name__)
@@ -171,6 +173,12 @@ async def publish_with_retry(
             else:
                 counters.unavailable += 1
             delay = backoff.next_delay()
+            reason = type(exc).__name__
+            telemetry.get_current_span().add_event(
+                "publish.backoff", {"reason": reason, "attempt": attempts, "delay.seconds": delay}
+            )
+            telemetry.count("edu_source_publish_refusals", attrs={"reason": reason})
+            waiting = time.monotonic()
             logger.debug(
                 "publish_refused",
                 task_id=str(message.task_id),
@@ -178,9 +186,14 @@ async def publish_with_retry(
                 attempt=attempts,
                 retry_in_ms=round(delay * 1000, 1),
             )
-            await sleep(delay)
+            try:
+                await sleep(delay)
+            finally:
+                telemetry.count("edu_source_backoff", time.monotonic() - waiting, unit="s")
         else:
             counters.accepted += 1
+            telemetry.count("edu_source_published")
+            logger.debug("task_published", attempts=attempts)
             backoff.reset()
             return attempts
 

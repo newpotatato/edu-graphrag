@@ -29,6 +29,7 @@ from aio_pika.exceptions import (
 from aio_pika.exceptions import (
     PublishError as ReturnedError,
 )
+from opentelemetry.trace import SpanKind
 
 from edu_graphrag.config import RabbitSettings
 from edu_graphrag.pipeline.messages import TaskMessage
@@ -39,6 +40,7 @@ from edu_graphrag.pipeline.publisher import (
     PublishUnroutableError,
 )
 from edu_graphrag.pipeline.topology import TASKS_EXCHANGE, TASKS_QUEUE, TASKS_ROUTING_KEY
+from edu_graphrag.telemetry import propagate_headers, span
 
 logger = structlog.get_logger(__name__)
 
@@ -74,7 +76,7 @@ class RabbitComponent:
         try:
             await self._connect()
         except Exception as exc:  # degraded start: the app must come up without the broker
-            logger.error("rabbitmq_connect_failed", error=f"{type(exc).__name__}: {exc}")
+            logger.error("rabbitmq_connect_failed", error=type(exc).__name__)
             self._reconnect_task = asyncio.create_task(self._reconnect_loop())
 
     async def _connect(self) -> None:
@@ -98,7 +100,7 @@ class RabbitComponent:
             try:
                 await self._connect()
             except Exception as exc:
-                logger.warning("rabbitmq_reconnect_failed", error=f"{type(exc).__name__}: {exc}")
+                logger.warning("rabbitmq_reconnect_failed", error=type(exc).__name__)
 
     async def shutdown(self) -> None:
         if self._reconnect_task is not None:
@@ -113,28 +115,39 @@ class RabbitComponent:
     async def publish(self, message: TaskMessage, *, confirm_timeout: float) -> None:
         """One attempt. With confirms: returns on basic.ack, raises a `PublishError` otherwise.
         Without confirms (anti-pattern baseline) it returns once the frame is written."""
-        if self._exchange is None:
-            raise BrokerUnavailableError("not connected to RabbitMQ")
-        amqp_message = aio_pika.Message(
-            message.model_dump_json().encode(),
-            message_id=str(message.task_id),
-            content_type="application/json",
-            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-        )
-        try:
-            # The outer timeout also bounds waiting for a channel that is being restored.
-            async with asyncio.timeout(confirm_timeout):
-                await self._exchange.publish(
-                    amqp_message, TASKS_ROUTING_KEY, mandatory=True, timeout=confirm_timeout
-                )
-        except ReturnedError as exc:
-            raise PublishUnroutableError(str(exc)) from exc
-        except DeliveryError as exc:
-            raise PublishRejectedError(str(exc)) from exc
-        except TimeoutError as exc:
-            raise PublishTimeoutError(f"no confirm within {confirm_timeout}s") from exc
-        except (AMQPError, ChannelInvalidStateError, ConnectionError) as exc:
-            raise BrokerUnavailableError(f"{type(exc).__name__}: {exc}") from exc
+        with span(
+            "publish",
+            {
+                "messaging.system": "rabbitmq",
+                "messaging.destination.name": TASKS_QUEUE.name,
+                "task.id": str(message.task_id),
+            },
+            kind=SpanKind.PRODUCER,
+        ):
+            if self._exchange is None:
+                raise BrokerUnavailableError("not connected to RabbitMQ")
+            amqp_message = aio_pika.Message(
+                message.model_dump_json().encode(),
+                message_id=str(message.task_id),
+                correlation_id=str(message.task_id),
+                headers=dict(propagate_headers()),
+                content_type="application/json",
+                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+            )
+            try:
+                # The outer timeout also bounds waiting for a channel that is being restored.
+                async with asyncio.timeout(confirm_timeout):
+                    await self._exchange.publish(
+                        amqp_message, TASKS_ROUTING_KEY, mandatory=True, timeout=confirm_timeout
+                    )
+            except ReturnedError as exc:
+                raise PublishUnroutableError(str(exc)) from exc
+            except DeliveryError as exc:
+                raise PublishRejectedError(str(exc)) from exc
+            except TimeoutError as exc:
+                raise PublishTimeoutError(f"no confirm within {confirm_timeout}s") from exc
+            except (AMQPError, ChannelInvalidStateError, ConnectionError) as exc:
+                raise BrokerUnavailableError(f"{type(exc).__name__}: {exc}") from exc
 
     async def _declare_tasks_passive(self) -> Any:
         """Passive declare of `tasks` on a throwaway channel: a 404 closes that channel, not

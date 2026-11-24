@@ -1,0 +1,12 @@
+exporters:
+  otlphttp/prometheus:
+    metrics_endpoint: http://prometheus:9090/api/v1/otlp/v1/metrics
+    timeout: 2s
+    sending_queue: {enabled: true, queue_size: 64, num_consumers: 1}
+    retry_on_failure: {enabled: true, max_elapsed_time: 10s}
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/prometheus]

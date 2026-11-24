@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 
-from edu_graphrag import __version__
+from edu_graphrag import __version__, telemetry
 from edu_graphrag.api import system, v1
 from edu_graphrag.api.task_service import PostgresTaskStore, TaskService
 from edu_graphrag.components import Component, build_components, run_components
@@ -15,6 +15,7 @@ from edu_graphrag.components.rabbit import RabbitComponent
 from edu_graphrag.config import Settings, get_settings
 from edu_graphrag.logging_config import configure_logging
 from edu_graphrag.middleware import RequestContextMiddleware
+from edu_graphrag.telemetry import running
 
 logger = structlog.get_logger(__name__)
 
@@ -45,7 +46,10 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        async with run_components(components):
+        async with running("edu-api"), run_components(components):
+            telemetry.gauge(
+                "edu_queue_limit", settings.pipeline.queue_max_length, {"queue": "tasks"}
+            )
             logger.info("app_started", version=__version__, commit=settings.app_commit_sha)
             yield
         logger.info("app_stopped")
@@ -54,7 +58,7 @@ def create_app(
     app.state.settings = settings
     app.state.components = components
     app.state.task_service = task_service or build_task_service(settings, components)
-    app.add_middleware(RequestContextMiddleware)
+    app.add_middleware(RequestContextMiddleware, api_prefix=v1.router.prefix)
     app.include_router(system.router)
     app.include_router(v1.router)
     return app

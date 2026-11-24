@@ -41,14 +41,18 @@ import json
 import time
 import uuid
 from collections.abc import Iterable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any
 
 import structlog
+from opentelemetry.context import Context
 from pydantic import ValidationError
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from edu_graphrag import telemetry
 from edu_graphrag.pipeline.messages import TaskMessage
 from edu_graphrag.pipeline.publisher import (
     Backoff,
@@ -194,28 +198,50 @@ class Source:
 
     async def _publish_one(self, message: TaskMessage, window: asyncio.Semaphore) -> None:
         try:
-            await publish_with_retry(
-                self.publisher,
-                message,
-                backoff=self.backoff,
-                confirm_timeout=self.confirm_timeout,
-                counters=self.counters,
-                sleep=self.sleep,
-            )
+            with (
+                structlog.contextvars.bound_contextvars(task_id=str(message.task_id)),
+                telemetry.span(
+                    "source.task",
+                    {"task.id": str(message.task_id)},
+                    parent=Context(),
+                ),
+            ):
+                attempts = await publish_with_retry(
+                    self.publisher,
+                    message,
+                    backoff=self.backoff,
+                    confirm_timeout=self.confirm_timeout,
+                    counters=self.counters,
+                    sleep=self.sleep,
+                )
+                logger.info("source_task_published", attempts=attempts)
         finally:
             self.in_flight -= 1
             window.release()
 
     async def _run_fire_and_forget(self, messages: Iterable[TaskMessage]) -> None:
-        """ANTI-PATTERN baseline: no window, no retries, refusals counted as lost."""
+        # Anti-pattern baseline: no confirm, no window, no retries.
         for message in messages:
-            try:
-                await self.publisher.publish(message, confirm_timeout=self.confirm_timeout)
-            except PublishError:
-                self.lost += 1
-                self.counters.rejected += 1
-            else:
-                self.counters.accepted += 1
+            with (
+                structlog.contextvars.bound_contextvars(task_id=str(message.task_id)),
+                telemetry.span(
+                    "source.task",
+                    {"task.id": str(message.task_id)},
+                    parent=Context(),
+                ),
+            ):
+                try:
+                    await self.publisher.publish(message, confirm_timeout=self.confirm_timeout)
+                except PublishError as exc:
+                    self.lost += 1
+                    self.counters.rejected += 1
+                    telemetry.count(
+                        "edu_source_publish_refusals", attrs={"reason": type(exc).__name__}
+                    )
+                else:
+                    self.counters.accepted += 1
+                    telemetry.count("edu_source_sent_unconfirmed")
+                    logger.info("source_task_sent_unconfirmed")
 
     def sample(
         self, *, elapsed: float, previous: PublishCounters, interval: float
@@ -249,6 +275,12 @@ async def report_stats(
         sample = source.sample(elapsed=now - started, previous=previous, interval=now - last)
         previous, last = PublishCounters(**vars(source.counters)), now
         logger.info("source_stats", **sample)
+        if sample["rejected_per_s"]:
+            logger.warning(
+                "source_backpressure",
+                nack_per_s=sample["rejected_per_s"],
+                backoff_ms=sample["current_backoff_ms"],
+            )
         if metrics is not None:
             metrics.write(sample)
 
@@ -268,6 +300,8 @@ async def run_file(
         await source.run(iter_tasks(path, limit=limit, stats=read_stats))
     finally:
         reporter.cancel()
+        with suppress(asyncio.CancelledError):
+            await reporter
     elapsed = time.monotonic() - started
     summary = {
         "read": read_stats.read,
@@ -321,19 +355,35 @@ async def amain(args: argparse.Namespace) -> dict[str, Any]:
     # are retried with backoff while the component reconnects in the background.
     await rabbit.startup()
     try:
-        return await run_file(source, args.file, limit=args.limit, metrics=metrics)
+        with structlog.contextvars.bound_contextvars(batch_id=uuid.uuid4().hex):
+            logger.info("source_started", limit=args.limit, backpressure=source.backpressure)
+            return await run_file(source, args.file, limit=args.limit, metrics=metrics)
     finally:
         await rabbit.shutdown()
         if metrics is not None:
             metrics.close()
 
 
+class SourceLogSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    log_level: str = "INFO"
+    telemetry_log_drain_seconds: float = 0
+
+
+async def run_cli(args: argparse.Namespace) -> None:
+    async with telemetry.running("edu-source"):
+        await amain(args)
+    drain = SourceLogSettings().telemetry_log_drain_seconds
+    if drain > 0:
+        await asyncio.sleep(min(drain, 5))  # let Docker discovery finish reading stdout
+
+
 def main(argv: list[str] | None = None) -> None:  # pragma: no cover - needs a real broker
     from edu_graphrag.logging_config import configure_logging
 
-    # Not `get_settings()`: the source must not require database passwords it never uses.
-    configure_logging("INFO", json_logs=True)
-    asyncio.run(amain(parse_args(argv)))
+    # Do not require database passwords in the source.
+    configure_logging(SourceLogSettings().log_level, service="edu-source")
+    asyncio.run(run_cli(parse_args(argv)))
 
 
 if __name__ == "__main__":  # pragma: no cover
